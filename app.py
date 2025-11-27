@@ -5,19 +5,21 @@ Downloads YouTube videos and uploads them to SafronStays storage.
 """
 
 import base64
+import json
 import os
+import random
+import re
+import subprocess
 import tempfile
 import uuid
-import random
-import subprocess
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
 
 import requests
 import yt_dlp
-from flask import Flask, request, jsonify
+from flask import Flask, jsonify, request
 
 app = Flask(__name__)
 
@@ -75,6 +77,11 @@ INVIDIOUS_INSTANCES = [
     "https://yt.mnt.lv",
 ]
 INVIDIOUS_VERIFY_TLS = os.getenv('INVIDIOUS_VERIFY_TLS', '1').lower() not in {'0', 'false', 'no'}
+WATCH_BASE_URL = "https://www.youtube.com/watch"
+YOUTUBEI_PLAYER_ENDPOINT = "https://www.youtube.com/youtubei/v1/player"
+YOUTUBE_WEB_CLIENT_VERSION = "2.20251125.06.00"
+YOUTUBE_WEB_CLIENT_NAME = "WEB"
+YOUTUBEI_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
 
 
 def _build_proxy_candidates(include_direct: bool = True) -> List[Optional[str]]:
@@ -206,6 +213,15 @@ def _public_metadata(metadata: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in metadata.items() if not k.startswith('__')}
 
 
+def _normalize_iso_date(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace('Z', '+00:00')).strftime('%Y%m%d')
+    except Exception:
+        return value.replace('-', '') if isinstance(value, str) else None
+
+
 def _format_upload_date(timestamp: Optional[int]) -> Optional[str]:
     """Return YYYYMMDD string if timestamp is provided"""
     if not timestamp:
@@ -275,6 +291,74 @@ def _map_invidious_metadata(data: Dict[str, Any], instance: str) -> Dict[str, An
     return metadata
 
 
+def _map_player_response_metadata(player_data: Dict[str, Any], proxy: Optional[str], strategy: str) -> Optional[Dict[str, Any]]:
+    if not player_data:
+        return None
+
+    video_details = player_data.get('videoDetails') or {}
+    microformat = (player_data.get('microformat') or {}).get('playerMicroformatRenderer') or {}
+    streaming = player_data.get('streamingData') or {}
+    captions = ((player_data.get('captions') or {}).get('playerCaptionsTracklistRenderer') or {}).get('captionTracks') or []
+
+    if not video_details.get('title'):
+        return None
+
+    duration_value: Optional[int]
+    try:
+        duration_value = int(video_details.get('lengthSeconds')) if video_details.get('lengthSeconds') else None
+    except (TypeError, ValueError):
+        duration_value = None
+
+    thumbnails = (video_details.get('thumbnail') or {}).get('thumbnails', [])
+    micro_thumbnails = microformat.get('thumbnail', {}).get('thumbnails', [])
+    if micro_thumbnails:
+        thumbnails = thumbnails or micro_thumbnails
+
+    metadata = {
+        'id': video_details.get('videoId'),
+        'title': video_details.get('title'),
+        'description': video_details.get('shortDescription') or microformat.get('description'),
+        'uploader': video_details.get('author') or microformat.get('ownerChannelName'),
+        'uploader_id': microformat.get('externalChannelId'),
+        'uploader_url': microformat.get('ownerProfileUrl'),
+        'channel': microformat.get('ownerChannelTitle') or video_details.get('author'),
+        'channel_id': microformat.get('externalChannelId'),
+        'channel_url': microformat.get('ownerProfileUrl'),
+        'duration': duration_value,
+        'duration_string': video_details.get('lengthSeconds'),
+        'view_count': video_details.get('viewCount'),
+        'like_count': None,
+        'comment_count': None,
+        'upload_date': _normalize_iso_date(microformat.get('uploadDate') or microformat.get('publishDate')),
+        'release_date': microformat.get('publishDate'),
+        'thumbnail': thumbnails[-1]['url'] if thumbnails else None,
+        'thumbnails': thumbnails,
+        'tags': video_details.get('keywords', []),
+        'categories': [microformat.get('category')] if microformat.get('category') else [],
+        'age_limit': 18 if microformat.get('isFamilySafe') is False else None,
+        'is_live': video_details.get('isLiveContent'),
+        'was_live': video_details.get('isLiveContent'),
+        'live_status': 'live' if video_details.get('isLiveContent') else 'not_live',
+        'webpage_url': f"https://www.youtube.com/watch?v={video_details.get('videoId')}",
+        'original_url': f"https://www.youtube.com/watch?v={video_details.get('videoId')}",
+        'availability': microformat.get('availability'),
+        'playable_in_embed': microformat.get('isEmbedRestricted') is not True,
+        'average_rating': video_details.get('averageRating'),
+        'chapters': [],
+        'subtitles': [track.get('languageCode') for track in captions if track.get('languageCode')],
+        'automatic_captions': [],
+        '__proxy': proxy,
+        '__strategy': strategy,
+        '__source': strategy,
+        '__mirror_streams': {
+            'formatStreams': streaming.get('formats', []),
+            'adaptiveFormats': streaming.get('adaptiveFormats', []),
+        },
+        '__player_response': player_data,
+    }
+    return metadata
+
+
 def fetch_metadata_from_invidious(url: str, proxy_candidates: Optional[List[Optional[str]]] = None) -> Optional[Dict[str, Any]]:
     """Fallback metadata extraction using Invidious mirrors"""
     video_id = extract_video_id(url)
@@ -313,6 +397,117 @@ def fetch_metadata_from_invidious(url: str, proxy_candidates: Optional[List[Opti
             except Exception as e:
                 print(f"Invidious fetch failed for {instance} via {proxy or 'DIRECT'}: {e}")
                 continue
+    return None
+
+
+def fetch_metadata_from_youtubei(url: str, proxy_candidates: Optional[List[Optional[str]]] = None) -> Optional[Dict[str, Any]]:
+    """Use the internal youtubei player endpoint to fetch metadata."""
+    video_id = extract_video_id(url)
+    if not video_id:
+        return None
+
+    proxy_candidates = proxy_candidates or _build_proxy_candidates()
+
+    for proxy in proxy_candidates:
+        headers = {
+            'User-Agent': get_random_user_agent(),
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+        }
+        payload = {
+            'context': {
+                'client': {
+                    'clientName': YOUTUBE_WEB_CLIENT_NAME,
+                    'clientVersion': YOUTUBE_WEB_CLIENT_VERSION,
+                    'hl': 'en',
+                    'gl': 'US',
+                    'utcOffsetMinutes': 0,
+                }
+            },
+            'videoId': video_id,
+            'contentCheckOk': True,
+            'racyCheckOk': True,
+        }
+        try:
+            response = requests.post(
+                f"{YOUTUBEI_PLAYER_ENDPOINT}?key={YOUTUBEI_KEY}",
+                headers=headers,
+                json=payload,
+                timeout=20,
+                proxies=_proxy_dict(proxy),
+            )
+            if response.status_code != 200:
+                print(f"youtubei player endpoint returned {response.status_code}")
+                continue
+
+            player_data = response.json()
+            metadata = _map_player_response_metadata(player_data, proxy, 'youtubei_player')
+            if metadata:
+                print("Metadata fetched through youtubei player endpoint.")
+                return metadata
+        except Exception as exc:
+            print(f"youtubei metadata fetch failed via {proxy or 'DIRECT'}: {exc}")
+            continue
+    return None
+
+
+def _extract_json_from_html(pattern: str, html: str) -> Optional[Dict[str, Any]]:
+    match = re.search(pattern, html, re.DOTALL)
+    if not match:
+        return None
+    blob = match.group(1)
+    try:
+        return json.loads(blob)
+    except Exception as exc:
+        print(f"Failed to parse JSON blob from watch html: {exc}")
+        return None
+
+
+def fetch_metadata_from_watch_html(url: str, proxy_candidates: Optional[List[Optional[str]]] = None) -> Optional[Dict[str, Any]]:
+    """Fallback metadata extraction by scraping the YouTube watch page directly."""
+    video_id = extract_video_id(url)
+    if not video_id:
+        return None
+
+    proxy_candidates = proxy_candidates or _build_proxy_candidates()
+    params = {
+        'v': video_id,
+        'hl': 'en',
+        'bpctr': str(int(datetime.utcnow().timestamp())),
+        'has_verified': '1',
+    }
+
+    for proxy in proxy_candidates:
+        headers = {
+            'User-Agent': get_random_user_agent(),
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Connection': 'keep-alive',
+            'Referer': 'https://www.youtube.com/',
+        }
+        try:
+            response = requests.get(
+                WATCH_BASE_URL,
+                params=params,
+                headers=headers,
+                timeout=20,
+                proxies=_proxy_dict(proxy),
+            )
+            if response.status_code != 200:
+                print(f"Watch HTML request failed ({response.status_code}) via {proxy or 'DIRECT'}")
+                continue
+
+            player_data = _extract_json_from_html(r"var ytInitialPlayerResponse\s*=\s*(\{.+?\});", response.text)
+            if not player_data:
+                print("ytInitialPlayerResponse not found in watch html.")
+                continue
+            metadata = _map_player_response_metadata(player_data, proxy, 'watch_html_scrape')
+            if metadata:
+                print("Watch page scraping succeeded.")
+                return metadata
+        except Exception as exc:
+            print(f"Watch HTML fetch failed via {proxy or 'DIRECT'}: {exc}")
+            continue
     return None
 
 
@@ -502,6 +697,15 @@ def get_full_video_metadata(url: str) -> Optional[Dict[str, Any]]:
                 continue
 
     print(f"Primary extraction strategies failed. Last error: {last_error}")
+
+    youtubei_metadata = fetch_metadata_from_youtubei(url, proxy_candidates)
+    if youtubei_metadata:
+        return youtubei_metadata
+
+    html_metadata = fetch_metadata_from_watch_html(url, proxy_candidates)
+    if html_metadata:
+        return html_metadata
+
     mirror_metadata = fetch_metadata_from_invidious(url, proxy_candidates)
     if mirror_metadata:
         return mirror_metadata
