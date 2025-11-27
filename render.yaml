@@ -3,9 +3,10 @@ services:
     name: youtube-processor
     env: python
     buildCommand: |
-      apt-get update && apt-get install -y ffmpeg
+      apt-get update && apt-get install -y ffmpeg curl
+      pip install --upgrade pip
       pip install -r requirements.txt
-    startCommand: gunicorn app:app --timeout 300
+    startCommand: gunicorn app:app --timeout 300 --bind 0.0.0.0:$PORT
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0

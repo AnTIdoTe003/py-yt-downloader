@@ -26,14 +26,27 @@ def _build_ydl_opts(extra_opts: Optional[Dict[str, Any]] = None) -> Dict[str, An
         'quiet': False,
         'no_warnings': False,
         'restrictfilenames': True,
-        'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['web', 'android', 'ios', 'tv'],
+                'player_skip': ['js', 'webpage'],
+                'skip': ['dash', 'hls'],
+            }
+        },
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'Accept-Encoding': 'gzip, deflate',
             'Connection': 'keep-alive',
-        }
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Cache-Control': 'max-age=0',
+        },
+        'geo_bypass': True,
+        'sleep_interval': 1,
+        'max_sleep_interval': 5,
     }
 
     cookie_file = os.getenv('YDL_COOKIES', 'cookies.txt')
@@ -48,51 +61,88 @@ def _build_ydl_opts(extra_opts: Optional[Dict[str, Any]] = None) -> Dict[str, An
 
 def get_full_video_metadata(url: str) -> Optional[Dict[str, Any]]:
     """Extract complete video metadata from YouTube URL"""
-    try:
-        ydl_opts = _build_ydl_opts()
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-
-            return {
-                'id': info.get('id'),
-                'title': info.get('title'),
-                'description': info.get('description'),
-                'uploader': info.get('uploader'),
-                'uploader_id': info.get('uploader_id'),
-                'uploader_url': info.get('uploader_url'),
-                'channel': info.get('channel'),
-                'channel_id': info.get('channel_id'),
-                'channel_url': info.get('channel_url'),
-                'duration': info.get('duration'),
-                'duration_string': info.get('duration_string'),
-                'view_count': info.get('view_count'),
-                'like_count': info.get('like_count'),
-                'comment_count': info.get('comment_count'),
-                'upload_date': info.get('upload_date'),
-                'release_date': info.get('release_date'),
-                'thumbnail': info.get('thumbnail'),
-                'thumbnails': info.get('thumbnails', []),
-                'tags': info.get('tags', []),
-                'categories': info.get('categories', []),
-                'age_limit': info.get('age_limit'),
-                'is_live': info.get('is_live'),
-                'was_live': info.get('was_live'),
-                'live_status': info.get('live_status'),
-                'webpage_url': info.get('webpage_url'),
-                'original_url': info.get('original_url'),
-                'availability': info.get('availability'),
-                'playable_in_embed': info.get('playable_in_embed'),
-                'average_rating': info.get('average_rating'),
-                'chapters': info.get('chapters'),
-                'subtitles': list(info.get('subtitles', {}).keys()),
-                'automatic_captions': list(info.get('automatic_captions', {}).keys()),
+    # Try multiple extraction strategies
+    strategies = [
+        # Strategy 1: Default configuration
+        {
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['web', 'android', 'ios', 'tv'],
+                    'player_skip': ['js', 'webpage'],
+                    'skip': ['dash', 'hls'],
+                }
             }
-    except Exception as e:
-        import traceback
-        print(f"Error extracting metadata: {e}")
-        print(traceback.format_exc())
-        return None
+        },
+        # Strategy 2: Simplified configuration
+        {
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['web'],
+                    'player_skip': ['js'],
+                }
+            }
+        },
+        # Strategy 3: Minimal configuration
+        {}
+    ]
+
+    last_error = None
+    for i, strategy_opts in enumerate(strategies):
+        try:
+            print(f"Trying extraction strategy {i+1}...")
+            ydl_opts = _build_ydl_opts(strategy_opts)
+
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+
+                if not info or not info.get('title'):
+                    continue
+
+                return {
+                    'id': info.get('id'),
+                    'title': info.get('title'),
+                    'description': info.get('description'),
+                    'uploader': info.get('uploader'),
+                    'uploader_id': info.get('uploader_id'),
+                    'uploader_url': info.get('uploader_url'),
+                    'channel': info.get('channel'),
+                    'channel_id': info.get('channel_id'),
+                    'channel_url': info.get('channel_url'),
+                    'duration': info.get('duration'),
+                    'duration_string': info.get('duration_string'),
+                    'view_count': info.get('view_count'),
+                    'like_count': info.get('like_count'),
+                    'comment_count': info.get('comment_count'),
+                    'upload_date': info.get('upload_date'),
+                    'release_date': info.get('release_date'),
+                    'thumbnail': info.get('thumbnail'),
+                    'thumbnails': info.get('thumbnails', []),
+                    'tags': info.get('tags', []),
+                    'categories': info.get('categories', []),
+                    'age_limit': info.get('age_limit'),
+                    'is_live': info.get('is_live'),
+                    'was_live': info.get('was_live'),
+                    'live_status': info.get('live_status'),
+                    'webpage_url': info.get('webpage_url'),
+                    'original_url': info.get('original_url'),
+                    'availability': info.get('availability'),
+                    'playable_in_embed': info.get('playable_in_embed'),
+                    'average_rating': info.get('average_rating'),
+                    'chapters': info.get('chapters'),
+                    'subtitles': list(info.get('subtitles', {}).keys()),
+                    'automatic_captions': list(info.get('automatic_captions', {}).keys()),
+                }
+        except Exception as e:
+            import traceback
+            last_error = e
+            print(f"Strategy {i+1} failed: {e}")
+            if i == len(strategies) - 1:  # Last strategy
+                print("All strategies failed. Full traceback:")
+                print(traceback.format_exc())
+            continue
+
+    print(f"All extraction strategies failed. Last error: {last_error}")
+    return None
 
 
 def download_video(url: str, quality: str = 'best') -> Optional[Path]:
