@@ -47,6 +47,7 @@ def _build_ydl_opts(extra_opts: Optional[Dict[str, Any]] = None) -> Dict[str, An
         'geo_bypass': True,
         'sleep_interval': 1,
         'max_sleep_interval': 5,
+        'source_address': '0.0.0.0',  # Bind to all interfaces
     }
 
     cookie_file = os.getenv('YDL_COOKIES', 'cookies.txt')
@@ -61,43 +62,62 @@ def _build_ydl_opts(extra_opts: Optional[Dict[str, Any]] = None) -> Dict[str, An
 
 def get_full_video_metadata(url: str) -> Optional[Dict[str, Any]]:
     """Extract complete video metadata from YouTube URL"""
-    # Try multiple extraction strategies
+    # Try multiple extraction strategies, starting with the most compatible
     strategies = [
-        # Strategy 1: Default configuration
-        {
-            'extractor_args': {
-                'youtube': {
-                    'player_client': ['web', 'android', 'ios', 'tv'],
-                    'player_skip': ['js', 'webpage'],
-                    'skip': ['dash', 'hls'],
-                }
-            }
-        },
-        # Strategy 2: Simplified configuration
+        # Strategy 1: Minimal configuration for Render/cloud environments
         {
             'extractor_args': {
                 'youtube': {
                     'player_client': ['web'],
-                    'player_skip': ['js'],
+                    'player_skip': ['js', 'webpage'],
                 }
             }
         },
-        # Strategy 3: Minimal configuration
-        {}
+        # Strategy 2: Even more minimal
+        {
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['web'],
+                }
+            }
+        },
+        # Strategy 3: Fallback with different headers
+        {
+            'extractor_args': {},
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+            }
+        }
     ]
 
     last_error = None
     for i, strategy_opts in enumerate(strategies):
         try:
-            print(f"Trying extraction strategy {i+1}...")
+            print(f"Trying extraction strategy {i+1} for Render environment...")
             ydl_opts = _build_ydl_opts(strategy_opts)
+
+            # Add additional options for cloud environments
+            ydl_opts.update({
+                'quiet': True,
+                'no_warnings': True,
+                'geo_bypass': True,
+                'sleep_interval': 1,
+                'max_sleep_interval': 3,
+            })
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
 
                 if not info or not info.get('title'):
+                    print(f"Strategy {i+1}: No title found in metadata")
                     continue
 
+                print(f"Strategy {i+1}: SUCCESS - extracted metadata for '{info.get('title')}'")
                 return {
                     'id': info.get('id'),
                     'title': info.get('title'),
@@ -135,7 +155,7 @@ def get_full_video_metadata(url: str) -> Optional[Dict[str, Any]]:
         except Exception as e:
             import traceback
             last_error = e
-            print(f"Strategy {i+1} failed: {e}")
+            print(f"Strategy {i+1} failed: {str(e)}")
             if i == len(strategies) - 1:  # Last strategy
                 print("All strategies failed. Full traceback:")
                 print(traceback.format_exc())
@@ -239,7 +259,7 @@ def process_video():
         # Get full metadata
         metadata = get_full_video_metadata(url)
         if not metadata:
-            return jsonify({'success': False, 'error': 'Failed to extract video metadata'}), 404
+            return jsonify({'success': False, 'error': 'Failed to extract video metadata'}), 500
 
         # Download video
         file_path = download_video(url, quality)
