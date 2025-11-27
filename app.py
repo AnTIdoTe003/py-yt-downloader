@@ -66,17 +66,31 @@ ALLOW_DIRECT_CONNECTION = os.getenv('YTDL_ALLOW_DIRECT', '1') != '0'
 ENABLE_FREE_PROXY_FALLBACK = os.getenv('YTDL_ENABLE_FREE_PROXIES', '1') != '0'
 
 INVIDIOUS_INSTANCES = [
-    # Popular mirrors - automatically rotated
+    # Popular mirrors - automatically rotated. We intentionally include only mirrors
+    # that historically allow API access without auth.
     "https://yt.artemislena.eu",
-    "https://iv.ggtyler.dev",
     "https://invidious.protokolla.fi",
-    "https://inv.nadeko.net",
     "https://invidious.jing.rocks",
     "https://invidious.privacydev.net",
     "https://invidious.fdn.fr",
     "https://yt.mnt.lv",
 ]
 INVIDIOUS_VERIFY_TLS = os.getenv('INVIDIOUS_VERIFY_TLS', '1').lower() not in {'0', 'false', 'no'}
+
+PIPED_API_INSTANCES = [
+    # API-only instances that expose proxied stream URLs (Render friendly).
+    "https://pipedapi.kavin.rocks",
+    "https://pipedapi-libre.kavin.rocks",
+    "https://pipedapi.leptons.xyz",
+    "https://pipedapi.nosebs.ru",
+    "https://piped-api.codespace.cz",
+    "https://pipedapi.reallyaweso.me",
+    "https://api.piped.private.coffee",
+    "https://pipedapi.ducks.party",
+    "https://pipedapi.darkness.services",
+    "https://pipedapi.orangenet.cc",
+]
+PIPED_VERIFY_TLS = True
 WATCH_BASE_URL = "https://www.youtube.com/watch"
 YOUTUBEI_PLAYER_ENDPOINT = "https://www.youtube.com/youtubei/v1/player"
 YOUTUBE_WEB_CLIENT_VERSION = "2.20251125.06.00"
@@ -232,6 +246,22 @@ def _format_upload_date(timestamp: Optional[int]) -> Optional[str]:
         return None
 
 
+def _normalize_simple_date(date_str: Optional[str]) -> Optional[str]:
+    """Accept YYYY-MM-DD or YYYY/MM/DD strings and return YYYYMMDD."""
+    if not date_str or not isinstance(date_str, str):
+        return None
+    clean = date_str.strip()
+    if not clean:
+        return None
+    clean = clean.replace('/', '-')
+    parts = clean.split('-')
+    if len(parts) == 3 and all(part.isdigit() for part in parts):
+        return ''.join(part.zfill(2) if idx else part.zfill(4) for idx, part in enumerate(parts))
+    if clean.isdigit() and len(clean) == 8:
+        return clean
+    return None
+
+
 def _map_invidious_metadata(data: Dict[str, Any], instance: str) -> Dict[str, Any]:
     """Normalize Invidious response to our metadata schema"""
     thumbnails = data.get('videoThumbnails', [])
@@ -288,6 +318,67 @@ def _map_invidious_metadata(data: Dict[str, Any], instance: str) -> Dict[str, An
         }
     }
 
+    metadata['__mirror_type'] = 'invidious'
+    return metadata
+
+
+def _map_piped_metadata(data: Dict[str, Any], instance: str) -> Dict[str, Any]:
+    """Normalize Piped /streams response to our metadata schema."""
+    try:
+        duration_value = int(data.get('duration')) if data.get('duration') is not None else None
+    except (TypeError, ValueError):
+        duration_value = None
+
+    subtitles = data.get('subtitles') or []
+
+    thumbnail_url = data.get('thumbnailUrl')
+    thumbnails = [{'url': thumbnail_url}] if thumbnail_url else []
+
+    video_id = data.get('id') or data.get('videoId')
+
+    metadata = {
+        'id': video_id,
+        'title': data.get('title'),
+        'description': data.get('description'),
+        'uploader': data.get('uploader'),
+        'uploader_id': data.get('uploaderId'),
+        'uploader_url': data.get('uploaderUrl'),
+        'channel': data.get('uploader'),
+        'channel_id': data.get('uploaderId'),
+        'channel_url': data.get('uploaderUrl'),
+        'duration': duration_value,
+        'duration_string': str(duration_value) if duration_value is not None else None,
+        'view_count': data.get('views'),
+        'like_count': data.get('likes'),
+        'comment_count': None,
+        'upload_date': _normalize_simple_date(data.get('uploadDate')) or _format_upload_date(data.get('uploadedTimestamp')),
+        'release_date': data.get('uploadedDate'),
+        'thumbnail': thumbnail_url,
+        'thumbnails': thumbnails,
+        'tags': data.get('tags') or [],
+        'categories': [],
+        'age_limit': 18 if data.get('nsfw') else None,
+        'is_live': data.get('livestream'),
+        'was_live': data.get('livestream'),
+        'live_status': 'live' if data.get('livestream') else 'not_live',
+        'webpage_url': f"https://www.youtube.com/watch?v={video_id}" if video_id else data.get('url'),
+        'original_url': data.get('url'),
+        'availability': 'public',
+        'playable_in_embed': True,
+        'average_rating': None,
+        'chapters': [],
+        'subtitles': [subtitle.get('code') for subtitle in subtitles if subtitle.get('code')],
+        'automatic_captions': [],
+        '__mirror_streams': {
+            'videoStreams': data.get('videoStreams', []),
+            'audioStreams': data.get('audioStreams', []),
+            'proxyUrl': data.get('proxyUrl'),
+        },
+        '__mirror_type': 'piped',
+        '__mirror_instance': instance,
+        '__source': 'piped',
+        '__piped_proxy_url': data.get('proxyUrl'),
+    }
     return metadata
 
 
@@ -397,6 +488,41 @@ def fetch_metadata_from_invidious(url: str, proxy_candidates: Optional[List[Opti
             except Exception as e:
                 print(f"Invidious fetch failed for {instance} via {proxy or 'DIRECT'}: {e}")
                 continue
+    return None
+
+
+def fetch_metadata_from_piped(url: str) -> Optional[Dict[str, Any]]:
+    """Use public Piped API instances to fetch metadata + proxied streams."""
+    video_id = extract_video_id(url)
+    if not video_id:
+        return None
+
+    instances = random.sample(PIPED_API_INSTANCES, len(PIPED_API_INSTANCES))
+    headers = {
+        'User-Agent': get_random_user_agent(),
+        'Accept': 'application/json',
+    }
+
+    for instance in instances:
+        api_url = f"{instance.rstrip('/')}/streams/{video_id}"
+        try:
+            response = requests.get(
+                api_url,
+                headers=headers,
+                timeout=25,
+                verify=PIPED_VERIFY_TLS
+            )
+            if response.status_code == 200:
+                data = response.json()
+                if not data:
+                    continue
+                metadata = _map_piped_metadata(data, instance)
+                print(f"Piped fallback succeeded via {instance}")
+                return metadata
+            print(f"Piped {instance} returned status {response.status_code}")
+        except Exception as exc:
+            print(f"Piped fetch failed for {instance}: {exc}")
+            continue
     return None
 
 
@@ -710,6 +836,10 @@ def get_full_video_metadata(url: str) -> Optional[Dict[str, Any]]:
     if mirror_metadata:
         return mirror_metadata
 
+    piped_metadata = fetch_metadata_from_piped(url)
+    if piped_metadata:
+        return piped_metadata
+
     print("All extraction strategies including mirrors failed.")
     return None
 
@@ -720,14 +850,60 @@ def _select_mirror_stream(metadata_context: Optional[Dict[str, Any]], quality: s
         return None
 
     streams = metadata_context.get('__mirror_streams') or {}
+    mirror_type = metadata_context.get('__mirror_type') or ('piped' if 'videoStreams' in streams else 'invidious')
+
+    def _score_quality(label: Optional[str], fallback: Optional[int] = None) -> int:
+        if isinstance(label, int):
+            return label
+        if isinstance(label, str):
+            digits = ''.join(ch for ch in label if ch.isdigit())
+            if digits:
+                return int(digits)
+        return fallback or 0
+
+    if mirror_type == 'piped':
+        video_streams = [s for s in streams.get('videoStreams', []) if s.get('url')]
+        audio_streams = [s for s in streams.get('audioStreams', []) if s.get('url')]
+
+        def _clone(stream: Dict[str, Any]) -> Dict[str, Any]:
+            clone = dict(stream)
+            clone['__mirror_type'] = 'piped'
+            return clone
+
+        if quality == 'audio':
+            if not audio_streams:
+                return None
+
+            def _audio_score(stream: Dict[str, Any]) -> int:
+                bitrate = stream.get('bitrate') or stream.get('avgBitrate') or stream.get('averageBitrate')
+                if isinstance(bitrate, str):
+                    digits = ''.join(ch for ch in bitrate if ch.isdigit())
+                    return int(digits or 0)
+                try:
+                    return int(bitrate or 0)
+                except (TypeError, ValueError):
+                    return 0
+
+            audio_streams.sort(key=_audio_score, reverse=True)
+            return _clone(audio_streams[0])
+
+        combined = [s for s in video_streams if not s.get('videoOnly')]
+        if not combined:
+            combined = [s for s in video_streams if s.get('hasAudio')]
+        if not combined:
+            return None
+        combined.sort(key=lambda s: (_score_quality(s.get('quality'), s.get('height')), s.get('height') or 0), reverse=True)
+        return _clone(combined[0])
+
+    # Default to invidious mapping
     format_streams = [s for s in streams.get('formatStreams', []) if s.get('url')]
     adaptive_streams = [s for s in streams.get('adaptiveFormats', []) if s.get('url')]
 
     def _quality_score(stream: Dict[str, Any]) -> int:
         label = stream.get('qualityLabel') or stream.get('quality')
-        if isinstance(label, str):
-            digits = ''.join(ch for ch in label if ch.isdigit())
-            return int(digits or 0)
+        score = _score_quality(label)
+        if score:
+            return score
         return int(stream.get('height') or 0)
 
     def _is_audio(stream: Dict[str, Any]) -> bool:
@@ -785,7 +961,15 @@ def _download_stream_via_requests(stream: Dict[str, Any], temp_dir: Path, metada
     if mirror_instance:
         headers['Referer'] = mirror_instance
 
+    stream_headers = stream.get('__headers')
+    if isinstance(stream_headers, dict):
+        headers.update(stream_headers)
+
     proxies = _proxy_dict(metadata_context.get('__proxy'))
+
+    verify_tls = INVIDIOUS_VERIFY_TLS
+    if metadata_context.get('__mirror_type') == 'piped':
+        verify_tls = PIPED_VERIFY_TLS
 
     try:
         with requests.get(
@@ -794,7 +978,7 @@ def _download_stream_via_requests(stream: Dict[str, Any], temp_dir: Path, metada
             stream=True,
             timeout=30,
             proxies=proxies,
-            verify=INVIDIOUS_VERIFY_TLS
+            verify=verify_tls
         ) as response:
             response.raise_for_status()
             with open(temp_file, 'wb') as fh:
@@ -875,6 +1059,11 @@ def download_video(url: str, quality: str = 'best', metadata_context: Optional[D
             'preferredcodec': 'mp3',
             'preferredquality': '192',
         }]
+
+    # Prefer mirror downloads when available (Render safe).
+    mirror_first = _download_via_mirror(metadata_context, quality, temp_dir)
+    if mirror_first:
+        return mirror_first
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:

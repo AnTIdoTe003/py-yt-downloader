@@ -125,6 +125,7 @@ Render blocks some outbound requests to YouTube directly. The API now includes:
 - **Inline cookies** via `YTDL_COOKIES_B64` (Base64 encoded Netscape cookie file)
 - **Mirror metadata fallback** (Invidious instances) with optional TLS opt-out `INVIDIOUS_VERIFY_TLS=0`
 - **Mirror downloads** when YouTube is unreachable
+- **Render-safe Piped proxies** baked into `app.py` (no `.env` needed) to fetch metadata + video via non-YouTube hosts
 
 For Render:
 1. Make sure `ffmpeg` is installed in `render.yaml` (already included).
@@ -230,6 +231,7 @@ curl -X POST http://localhost:5000/api/download-links \
 - ✅ **NEW:** Rotating user agents for better compatibility
 - ✅ **NEW:** Cloud-ready (works on EC2, not blocked like Render)
 - ✅ **NEW:** Multiple fallback strategies for reliability
+- ✅ **NEW:** Built-in Piped proxy downloads for Render deployments
 
 ## Troubleshooting
 
