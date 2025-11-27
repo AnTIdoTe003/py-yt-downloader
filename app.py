@@ -23,18 +23,21 @@ def _build_ydl_opts(extra_opts: Optional[Dict[str, Any]] = None) -> Dict[str, An
     """Build yt-dlp options"""
     opts: Dict[str, Any] = {
         'noplaylist': True,
-        'quiet': True,
-        'no_warnings': True,
+        'quiet': False,
+        'no_warnings': False,
         'restrictfilenames': True,
+        'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9',
-            'Referer': 'https://www.youtube.com/',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive',
         }
     }
 
-    cookie_file = os.getenv('YDL_COOKIES')
-    if cookie_file and Path(cookie_file).exists():
+    cookie_file = os.getenv('YDL_COOKIES', 'cookies.txt')
+    if Path(cookie_file).exists():
         opts['cookiefile'] = cookie_file
 
     if extra_opts:
