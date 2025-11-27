@@ -91,6 +91,9 @@ PIPED_API_INSTANCES = [
     "https://pipedapi.orangenet.cc",
 ]
 PIPED_VERIFY_TLS = True
+
+# TurboScribe downloader endpoint (most reliable, uses ANDROID client)
+TURBOSCRIBE_DOWNLOADER_URL = "https://turboscribe.ai/downloader/youtube/video"
 WATCH_BASE_URL = "https://www.youtube.com/watch"
 YOUTUBEI_PLAYER_ENDPOINT = "https://www.youtube.com/youtubei/v1/player"
 YOUTUBE_WEB_CLIENT_VERSION = "2.20251125.06.00"
@@ -524,6 +527,100 @@ def fetch_metadata_from_piped(url: str) -> Optional[Dict[str, Any]]:
             print(f"Piped fetch failed for {instance}: {exc}")
             continue
     return None
+
+
+def fetch_download_url_from_turboscribe(url: str) -> Optional[Dict[str, Any]]:
+    """
+    Use TurboScribe's free YouTube downloader to get direct googlevideo.com URLs.
+    This is the most reliable method as it uses the ANDROID client which doesn't
+    require signature deciphering.
+    """
+    from bs4 import BeautifulSoup
+
+    video_id = extract_video_id(url)
+    if not video_id:
+        return None
+
+    youtube_url = f"https://www.youtube.com/watch?v={video_id}"
+
+    session = requests.Session()
+    headers = {
+        'User-Agent': get_random_user_agent(),
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Referer': 'https://turboscribe.ai/',
+    }
+
+    try:
+        # First, load the page to get any required cookies/tokens
+        page_response = session.get(
+            TURBOSCRIBE_DOWNLOADER_URL,
+            headers=headers,
+            timeout=15
+        )
+        if page_response.status_code != 200:
+            print(f"TurboScribe page load failed: {page_response.status_code}")
+            return None
+
+        # Now submit the form via HTMX-style POST
+        # TurboScribe uses HTMX, we need to simulate the form submission
+        form_headers = {
+            'User-Agent': get_random_user_agent(),
+            'Accept': 'text/html, */*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Referer': TURBOSCRIBE_DOWNLOADER_URL,
+            'HX-Request': 'true',
+            'HX-Current-URL': TURBOSCRIBE_DOWNLOADER_URL,
+        }
+
+        # The form data - just the YouTube URL
+        form_data = {
+            'url': youtube_url,
+        }
+
+        # Try the HTMX endpoint pattern
+        htmx_response = session.post(
+            f"{TURBOSCRIBE_DOWNLOADER_URL}",
+            headers=form_headers,
+            data=form_data,
+            timeout=30
+        )
+
+        if htmx_response.status_code == 200:
+            # Parse the response to find the download link
+            soup = BeautifulSoup(htmx_response.text, 'html.parser')
+
+            # Look for googlevideo.com links
+            download_link = None
+            title = None
+
+            for link in soup.find_all('a', href=True):
+                href = link.get('href', '')
+                if 'googlevideo.com' in href and 'videoplayback' in href:
+                    download_link = href
+                    # Try to get title from nearby elements
+                    title_elem = link.find('h1') or link.find_parent().find('h1')
+                    if title_elem:
+                        title = title_elem.get_text(strip=True)
+                    break
+
+            if download_link:
+                print(f"TurboScribe succeeded: found direct download URL")
+                return {
+                    'id': video_id,
+                    'title': title or f'YouTube Video {video_id}',
+                    'download_url': download_link,
+                    '__source': 'turboscribe',
+                    '__mirror_type': 'turboscribe',
+                }
+
+        print(f"TurboScribe: no download link found in response")
+        return None
+
+    except Exception as exc:
+        print(f"TurboScribe fetch failed: {exc}")
+        return None
 
 
 def fetch_metadata_from_youtubei(url: str, proxy_candidates: Optional[List[Optional[str]]] = None) -> Optional[Dict[str, Any]]:
@@ -1037,10 +1134,48 @@ def _download_via_mirror(metadata_context: Optional[Dict[str, Any]], quality: st
     return file_path
 
 
+def _download_via_turboscribe(url: str, temp_dir: Path) -> Optional[Path]:
+    """Download video using TurboScribe's direct googlevideo.com URL."""
+    result = fetch_download_url_from_turboscribe(url)
+    if not result or not result.get('download_url'):
+        return None
+
+    download_url = result['download_url']
+    title = result.get('title', 'video')
+    # Sanitize title for filename
+    safe_title = "".join(c for c in title if c.isalnum() or c in ' -_').strip()[:100]
+    temp_file = temp_dir / f"{safe_title or 'video'}.mp4"
+
+    headers = {
+        'User-Agent': get_random_user_agent(),
+        'Referer': 'https://www.youtube.com/',
+    }
+
+    try:
+        with requests.get(download_url, headers=headers, stream=True, timeout=60) as response:
+            response.raise_for_status()
+            with open(temp_file, 'wb') as fh:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        fh.write(chunk)
+        print(f"Downloaded via TurboScribe to {temp_file}")
+        return temp_file
+    except Exception as exc:
+        print(f"TurboScribe download failed: {exc}")
+        temp_file.unlink(missing_ok=True)
+        return None
+
+
 def download_video(url: str, quality: str = 'best', metadata_context: Optional[Dict[str, Any]] = None) -> Optional[Path]:
     """Download video to temp directory"""
     temp_dir = Path(tempfile.gettempdir()) / f"yt_dl_{uuid.uuid4()}"
     temp_dir.mkdir(exist_ok=True)
+
+    # Try TurboScribe first (most reliable for Render)
+    if quality != 'audio':
+        turbo_file = _download_via_turboscribe(url, temp_dir)
+        if turbo_file:
+            return turbo_file
 
     extra_opts: Dict[str, Any] = {
         'outtmpl': str(temp_dir / '%(title)s.%(ext)s'),
@@ -1205,6 +1340,37 @@ def get_metadata():
         return jsonify({'success': False, 'error': 'Internal server error'}), 500
 
 
+@app.route('/api/direct-url', methods=['POST'])
+def get_direct_url():
+    """Get direct googlevideo.com download URL via TurboScribe"""
+    try:
+        data = request.get_json()
+
+        if not data or 'url' not in data:
+            return jsonify({'success': False, 'error': 'Missing required field: url'}), 400
+
+        url = data['url']
+
+        if not validate_youtube_url(url):
+            return jsonify({'success': False, 'error': 'Invalid YouTube URL'}), 400
+
+        result = fetch_download_url_from_turboscribe(url)
+        if not result or not result.get('download_url'):
+            return jsonify({'success': False, 'error': 'Failed to get direct download URL'}), 500
+
+        return jsonify({
+            'success': True,
+            'video_id': result.get('id'),
+            'title': result.get('title'),
+            'download_url': result.get('download_url'),
+            'source': 'turboscribe'
+        })
+
+    except Exception as e:
+        print(f"Direct URL API Error: {e}")
+        return jsonify({'success': False, 'error': 'Internal server error'}), 500
+
+
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({'status': 'healthy'})
@@ -1217,6 +1383,7 @@ def index():
         'endpoints': {
             'POST /api/process': 'Download video, get metadata, upload to storage',
             'POST /api/metadata': 'Get video metadata only',
+            'POST /api/direct-url': 'Get direct googlevideo.com download URL',
             'GET /health': 'Health check'
         }
     })
