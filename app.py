@@ -89,7 +89,9 @@ def get_full_video_metadata(url: str) -> Optional[Dict[str, Any]]:
                 'automatic_captions': list(info.get('automatic_captions', {}).keys()),
             }
     except Exception as e:
+        import traceback
         print(f"Error extracting metadata: {e}")
+        print(traceback.format_exc())
         return None
 
 
