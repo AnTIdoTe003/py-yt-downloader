@@ -536,6 +536,7 @@ def fetch_download_url_from_turboscribe(url: str) -> Optional[Dict[str, Any]]:
     require signature deciphering.
     """
     from bs4 import BeautifulSoup
+    import html
 
     video_id = extract_video_id(url)
     if not video_id:
@@ -544,76 +545,69 @@ def fetch_download_url_from_turboscribe(url: str) -> Optional[Dict[str, Any]]:
     youtube_url = f"https://www.youtube.com/watch?v={video_id}"
 
     session = requests.Session()
+
+    # TurboScribe HTMX endpoint
+    htmx_url = "https://turboscribe.ai/_htmx/NCN20gAEkZMBzQPXkQc"
+
     headers = {
-        'User-Agent': get_random_user_agent(),
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept': '*/*',
         'Accept-Language': 'en-US,en;q=0.9',
-        'Referer': 'https://turboscribe.ai/',
+        'Content-Type': 'application/json',
+        'Origin': 'https://turboscribe.ai',
+        'Referer': 'https://turboscribe.ai/downloader/youtube/video',
+        'User-Agent': 'Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Mobile Safari/537.36',
+        'sec-ch-ua-mobile': '?1',
+        'sec-ch-ua-platform': '"Android"',
     }
 
     try:
-        # First, load the page to get any required cookies/tokens
-        page_response = session.get(
-            TURBOSCRIBE_DOWNLOADER_URL,
+        response = session.post(
+            htmx_url,
             headers=headers,
-            timeout=15
-        )
-        if page_response.status_code != 200:
-            print(f"TurboScribe page load failed: {page_response.status_code}")
-            return None
-
-        # Now submit the form via HTMX-style POST
-        # TurboScribe uses HTMX, we need to simulate the form submission
-        form_headers = {
-            'User-Agent': get_random_user_agent(),
-            'Accept': 'text/html, */*',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'Referer': TURBOSCRIBE_DOWNLOADER_URL,
-            'HX-Request': 'true',
-            'HX-Current-URL': TURBOSCRIBE_DOWNLOADER_URL,
-        }
-
-        # The form data - just the YouTube URL
-        form_data = {
-            'url': youtube_url,
-        }
-
-        # Try the HTMX endpoint pattern
-        htmx_response = session.post(
-            f"{TURBOSCRIBE_DOWNLOADER_URL}",
-            headers=form_headers,
-            data=form_data,
+            json={'url': youtube_url},
             timeout=30
         )
 
-        if htmx_response.status_code == 200:
-            # Parse the response to find the download link
-            soup = BeautifulSoup(htmx_response.text, 'html.parser')
+        if response.status_code != 200:
+            print(f"TurboScribe HTMX failed: {response.status_code}")
+            return None
 
-            # Look for googlevideo.com links
-            download_link = None
-            title = None
+        # Parse the HTML response
+        soup = BeautifulSoup(response.text, 'html.parser')
 
-            for link in soup.find_all('a', href=True):
-                href = link.get('href', '')
-                if 'googlevideo.com' in href and 'videoplayback' in href:
-                    download_link = href
-                    # Try to get title from nearby elements
-                    title_elem = link.find('h1') or link.find_parent().find('h1')
-                    if title_elem:
-                        title = title_elem.get_text(strip=True)
-                    break
+        # Find all download links
+        video_url = None
+        audio_url = None
+        title = None
 
-            if download_link:
-                print(f"TurboScribe succeeded: found direct download URL")
-                return {
-                    'id': video_id,
-                    'title': title or f'YouTube Video {video_id}',
-                    'download_url': download_link,
-                    '__source': 'turboscribe',
-                    '__mirror_type': 'turboscribe',
-                }
+        # Get title from h1
+        h1 = soup.find('h1')
+        if h1:
+            title = h1.get_text(strip=True)
+
+        # Find all links with googlevideo.com
+        for link in soup.find_all('a', href=True):
+            href = link.get('href', '')
+            if 'googlevideo.com' in href and 'videoplayback' in href:
+                # Decode HTML entities
+                href = html.unescape(href)
+
+                # Check if it's video or audio based on mime type in URL
+                if 'mime=video' in href and not video_url:
+                    video_url = href
+                elif 'mime=audio' in href and not audio_url:
+                    audio_url = href
+
+        if video_url or audio_url:
+            print(f"TurboScribe succeeded: found direct download URL")
+            return {
+                'id': video_id,
+                'title': title or f'YouTube Video {video_id}',
+                'download_url': video_url,
+                'audio_url': audio_url,
+                '__source': 'turboscribe',
+                '__mirror_type': 'turboscribe',
+            }
 
         print(f"TurboScribe: no download link found in response")
         return None
@@ -1355,14 +1349,15 @@ def get_direct_url():
             return jsonify({'success': False, 'error': 'Invalid YouTube URL'}), 400
 
         result = fetch_download_url_from_turboscribe(url)
-        if not result or not result.get('download_url'):
+        if not result or (not result.get('download_url') and not result.get('audio_url')):
             return jsonify({'success': False, 'error': 'Failed to get direct download URL'}), 500
 
         return jsonify({
             'success': True,
             'video_id': result.get('id'),
             'title': result.get('title'),
-            'download_url': result.get('download_url'),
+            'video_url': result.get('download_url'),
+            'audio_url': result.get('audio_url'),
             'source': 'turboscribe'
         })
 
