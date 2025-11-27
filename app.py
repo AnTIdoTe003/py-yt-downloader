@@ -7,6 +7,7 @@ Downloads YouTube videos and uploads them to SafronStays storage.
 import os
 import tempfile
 import uuid
+import random
 from pathlib import Path
 from typing import Dict, Any, Optional
 
@@ -17,6 +18,58 @@ from flask import Flask, request, jsonify
 app = Flask(__name__)
 
 UPLOAD_API_URL = "https://go.saffronstays.com/api/upload-file"
+
+# Free proxy sources (some might work)
+FREE_PROXY_SOURCES = [
+    "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=https&timeout=10000&country=all&ssl=all&anonymity=all",
+    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
+    "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt",
+    "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
+]
+
+# Rotating user agents to avoid detection
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/121.0',
+    'Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/121.0',
+]
+
+
+def get_free_proxy() -> Optional[str]:
+    """Get a working free proxy"""
+    for source_url in FREE_PROXY_SOURCES:
+        try:
+            response = requests.get(source_url, timeout=10)
+            if response.status_code == 200:
+                proxies = response.text.strip().split('\n')
+                # Filter out empty lines and comments
+                valid_proxies = [p.strip() for p in proxies if p.strip() and not p.startswith('#')]
+                if valid_proxies:
+                    # Try a few proxies to find one that works
+                    for proxy in random.sample(valid_proxies, min(3, len(valid_proxies))):
+                        proxy_url = f"https://{proxy}" if 'https' in source_url else f"http://{proxy}"
+                        # Quick test if proxy is accessible
+                        try:
+                            test_response = requests.get('https://httpbin.org/ip', proxies={'https': proxy_url}, timeout=5)
+                            if test_response.status_code == 200:
+                                return proxy_url
+                        except:
+                            continue
+                    # If none work, return the first one anyway
+                    proxy = random.choice(valid_proxies)
+                    return f"https://{proxy}" if 'https' in source_url else f"http://{proxy}"
+        except Exception as e:
+            print(f"Failed to get proxies from {source_url}: {e}")
+            continue
+    return None
+
+
+def get_random_user_agent() -> str:
+    """Get a random user agent"""
+    return random.choice(USER_AGENTS)
 
 
 def _build_ydl_opts(extra_opts: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -62,43 +115,73 @@ def _build_ydl_opts(extra_opts: Optional[Dict[str, Any]] = None) -> Dict[str, An
 
 def get_full_video_metadata(url: str) -> Optional[Dict[str, Any]]:
     """Extract complete video metadata from YouTube URL"""
-    # Try multiple extraction strategies, starting with the most compatible
+    # Try multiple extraction strategies with proxies and rotating user agents
     strategies = [
-        # Strategy 1: Minimal configuration for Render/cloud environments
-        {
+        # Strategy 1: With free proxy (if available)
+        lambda: {
             'extractor_args': {
                 'youtube': {
                     'player_client': ['web'],
                     'player_skip': ['js', 'webpage'],
                 }
-            }
-        },
-        # Strategy 2: Even more minimal
-        {
-            'extractor_args': {
-                'youtube': {
-                    'player_client': ['web'],
-                }
-            }
-        },
-        # Strategy 3: Fallback with different headers
-        {
-            'extractor_args': {},
+            },
             'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'User-Agent': get_random_user_agent(),
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                 'Accept-Language': 'en-US,en;q=0.5',
                 'Accept-Encoding': 'gzip, deflate',
                 'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1',
+            },
+            'proxy': get_free_proxy(),  # Try free proxy
+        },
+        # Strategy 2: Rotating user agent without proxy
+        lambda: {
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['web', 'android'],
+                    'player_skip': ['js'],
+                }
+            },
+            'http_headers': {
+                'User-Agent': get_random_user_agent(),
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate',
+                'Connection': 'keep-alive',
+                'Referer': 'https://www.youtube.com/',
+            }
+        },
+        # Strategy 3: Minimal with different client
+        lambda: {
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['ios'],
+                }
+            },
+            'http_headers': {
+                'User-Agent': get_random_user_agent(),
+                'Accept': '*/*',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Connection': 'keep-alive',
+            }
+        },
+        # Strategy 4: Fallback without extractor args
+        lambda: {
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (compatible; yt-dlp/2024.12.13; +https://github.com/yt-dlp/yt-dlp)',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Connection': 'keep-alive',
             }
         }
     ]
 
     last_error = None
-    for i, strategy_opts in enumerate(strategies):
+    for i, strategy_func in enumerate(strategies):
         try:
-            print(f"Trying extraction strategy {i+1} for Render environment...")
+            print(f"Trying extraction strategy {i+1} for cloud environment...")
+            strategy_opts = strategy_func()  # Call the lambda function
             ydl_opts = _build_ydl_opts(strategy_opts)
 
             # Add additional options for cloud environments
@@ -109,6 +192,13 @@ def get_full_video_metadata(url: str) -> Optional[Dict[str, Any]]:
                 'sleep_interval': 1,
                 'max_sleep_interval': 3,
             })
+
+            # Only set proxy if we got one
+            if strategy_opts.get('proxy'):
+                ydl_opts['proxy'] = strategy_opts['proxy']
+                print(f"Using proxy: {strategy_opts['proxy']}")
+            else:
+                print("No proxy available, trying without proxy")
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
