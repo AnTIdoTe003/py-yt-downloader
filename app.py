@@ -529,92 +529,78 @@ def fetch_metadata_from_piped(url: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def fetch_download_url_from_turboscribe(url: str) -> Optional[Dict[str, Any]]:
+def fetch_download_url_from_cobalt(url: str) -> Optional[Dict[str, Any]]:
     """
-    Use TurboScribe's free YouTube downloader to get direct googlevideo.com URLs.
-    This is the most reliable method as it uses the ANDROID client which doesn't
-    require signature deciphering.
+    Use cobalt.tools API to get direct download URLs.
+    Cobalt is a free, open-source service that works without auth.
     """
-    from bs4 import BeautifulSoup
-    import html
-
     video_id = extract_video_id(url)
     if not video_id:
         return None
 
     youtube_url = f"https://www.youtube.com/watch?v={video_id}"
 
-    session = requests.Session()
-
-    # TurboScribe HTMX endpoint
-    htmx_url = "https://turboscribe.ai/_htmx/NCN20gAEkZMBzQPXkQc"
+    # Public cobalt API instances
+    cobalt_instances = [
+        "https://api.cobalt.tools",
+        "https://cobalt-api.hyper.lol",
+    ]
 
     headers = {
-        'Accept': '*/*',
-        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept': 'application/json',
         'Content-Type': 'application/json',
-        'Origin': 'https://turboscribe.ai',
-        'Referer': 'https://turboscribe.ai/downloader/youtube/video',
-        'User-Agent': 'Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Mobile Safari/537.36',
-        'sec-ch-ua-mobile': '?1',
-        'sec-ch-ua-platform': '"Android"',
+        'User-Agent': get_random_user_agent(),
     }
 
-    try:
-        response = session.post(
-            htmx_url,
-            headers=headers,
-            json={'url': youtube_url},
-            timeout=30
-        )
+    for instance in cobalt_instances:
+        try:
+            response = requests.post(
+                f"{instance}/api/json",
+                headers=headers,
+                json={
+                    'url': youtube_url,
+                    'vCodec': 'h264',
+                    'vQuality': '720',
+                    'aFormat': 'mp3',
+                },
+                timeout=30
+            )
 
-        if response.status_code != 200:
-            print(f"TurboScribe HTMX failed: {response.status_code}")
-            return None
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('status') == 'stream' or data.get('status') == 'redirect':
+                    download_url = data.get('url')
+                    if download_url:
+                        print(f"Cobalt succeeded via {instance}")
+                        return {
+                            'id': video_id,
+                            'title': f'YouTube Video {video_id}',
+                            'download_url': download_url,
+                            'audio_url': None,
+                            '__source': 'cobalt',
+                            '__mirror_type': 'cobalt',
+                        }
+                elif data.get('status') == 'picker':
+                    # Multiple options available
+                    picker = data.get('picker', [])
+                    if picker:
+                        download_url = picker[0].get('url')
+                        if download_url:
+                            print(f"Cobalt picker succeeded via {instance}")
+                            return {
+                                'id': video_id,
+                                'title': f'YouTube Video {video_id}',
+                                'download_url': download_url,
+                                'audio_url': None,
+                                '__source': 'cobalt',
+                                '__mirror_type': 'cobalt',
+                            }
+            print(f"Cobalt {instance} failed: {response.status_code}")
+        except Exception as exc:
+            print(f"Cobalt {instance} error: {exc}")
+            continue
 
-        # Parse the HTML response
-        soup = BeautifulSoup(response.text, 'html.parser')
-
-        # Find all download links
-        video_url = None
-        audio_url = None
-        title = None
-
-        # Get title from h1
-        h1 = soup.find('h1')
-        if h1:
-            title = h1.get_text(strip=True)
-
-        # Find all links with googlevideo.com
-        for link in soup.find_all('a', href=True):
-            href = link.get('href', '')
-            if 'googlevideo.com' in href and 'videoplayback' in href:
-                # Decode HTML entities
-                href = html.unescape(href)
-
-                # Check if it's video or audio based on mime type in URL
-                if 'mime=video' in href and not video_url:
-                    video_url = href
-                elif 'mime=audio' in href and not audio_url:
-                    audio_url = href
-
-        if video_url or audio_url:
-            print(f"TurboScribe succeeded: found direct download URL")
-            return {
-                'id': video_id,
-                'title': title or f'YouTube Video {video_id}',
-                'download_url': video_url,
-                'audio_url': audio_url,
-                '__source': 'turboscribe',
-                '__mirror_type': 'turboscribe',
-            }
-
-        print(f"TurboScribe: no download link found in response")
-        return None
-
-    except Exception as exc:
-        print(f"TurboScribe fetch failed: {exc}")
-        return None
+    return None
 
 
 def fetch_metadata_from_youtubei(url: str, proxy_candidates: Optional[List[Optional[str]]] = None) -> Optional[Dict[str, Any]]:
@@ -1128,9 +1114,9 @@ def _download_via_mirror(metadata_context: Optional[Dict[str, Any]], quality: st
     return file_path
 
 
-def _download_via_turboscribe(url: str, temp_dir: Path) -> Optional[Path]:
-    """Download video using TurboScribe's direct googlevideo.com URL."""
-    result = fetch_download_url_from_turboscribe(url)
+def _download_via_cobalt(url: str, temp_dir: Path) -> Optional[Path]:
+    """Download video using Cobalt's direct URL."""
+    result = fetch_download_url_from_cobalt(url)
     if not result or not result.get('download_url'):
         return None
 
@@ -1152,10 +1138,10 @@ def _download_via_turboscribe(url: str, temp_dir: Path) -> Optional[Path]:
                 for chunk in response.iter_content(chunk_size=1024 * 1024):
                     if chunk:
                         fh.write(chunk)
-        print(f"Downloaded via TurboScribe to {temp_file}")
+        print(f"Downloaded via Cobalt to {temp_file}")
         return temp_file
     except Exception as exc:
-        print(f"TurboScribe download failed: {exc}")
+        print(f"Cobalt download failed: {exc}")
         temp_file.unlink(missing_ok=True)
         return None
 
@@ -1165,11 +1151,11 @@ def download_video(url: str, quality: str = 'best', metadata_context: Optional[D
     temp_dir = Path(tempfile.gettempdir()) / f"yt_dl_{uuid.uuid4()}"
     temp_dir.mkdir(exist_ok=True)
 
-    # Try TurboScribe first (most reliable for Render)
+    # Try Cobalt first (most reliable for Render)
     if quality != 'audio':
-        turbo_file = _download_via_turboscribe(url, temp_dir)
-        if turbo_file:
-            return turbo_file
+        cobalt_file = _download_via_cobalt(url, temp_dir)
+        if cobalt_file:
+            return cobalt_file
 
     extra_opts: Dict[str, Any] = {
         'outtmpl': str(temp_dir / '%(title)s.%(ext)s'),
@@ -1348,7 +1334,7 @@ def get_direct_url():
         if not validate_youtube_url(url):
             return jsonify({'success': False, 'error': 'Invalid YouTube URL'}), 400
 
-        result = fetch_download_url_from_turboscribe(url)
+        result = fetch_download_url_from_cobalt(url)
         if not result or (not result.get('download_url') and not result.get('audio_url')):
             return jsonify({'success': False, 'error': 'Failed to get direct download URL'}), 500
 
