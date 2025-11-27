@@ -117,6 +117,23 @@ Unlike Render/Heroku, EC2 instances work great with YouTube downloads. Here's ho
 - ✅ **Full network control**
 - ✅ **Proxy support built-in** for extra reliability
 
+### Running on Render/Other PaaS
+
+Render blocks some outbound requests to YouTube directly. The API now includes:
+
+- **Automatic proxy rotation** (configure with `YTDL_PROXY` or `YTDL_PROXY_POOL`)
+- **Inline cookies** via `YTDL_COOKIES_B64` (Base64 encoded Netscape cookie file)
+- **Mirror metadata fallback** (Invidious instances) with optional TLS opt-out `INVIDIOUS_VERIFY_TLS=0`
+- **Mirror downloads** when YouTube is unreachable
+
+For Render:
+1. Make sure `ffmpeg` is installed in `render.yaml` (already included).
+2. Add environment variables in the Render dashboard:
+   - `YTDL_PROXY`: `http://user:pass@proxyhost:port` (or use `YTDL_PROXY_POOL` for comma-separated list)
+   - `YTDL_COOKIES_B64`: Paste a Base64 string of your cookies.txt if you need age-restricted videos.
+   - `INVIDIOUS_VERIFY_TLS`: set to `0` only if your Render region has TLS issues with some mirrors.
+3. Deploy as usual – the API will transparently retry on different strategies before failing.
+
 ## API Usage
 
 The project now includes a REST API that returns downloadable video links instead of downloading videos directly.
