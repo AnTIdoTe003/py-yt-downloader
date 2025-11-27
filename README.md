@@ -73,6 +73,50 @@ python youtube_downloader.py "https://www.youtube.com/watch?v=dQw4w9WgXcQ" -o /p
 python youtube_downloader.py "https://www.youtube.com/watch?v=dQw4w9WgXcQ" -f 22
 ```
 
+## 🚀 Deployment on EC2 (Free & Works!)
+
+Unlike Render/Heroku, EC2 instances work great with YouTube downloads. Here's how to deploy:
+
+### EC2 Setup (Free Tier)
+1. **Launch EC2 Instance:**
+   - AMI: Amazon Linux 2 or Ubuntu
+   - Instance Type: t2.micro (free tier)
+   - Security Group: Allow HTTP (80) and Custom TCP (8000)
+
+2. **Connect via SSH and install dependencies:**
+   ```bash
+   # Update system
+   sudo yum update -y  # Amazon Linux
+   # OR
+   sudo apt update && sudo apt upgrade -y  # Ubuntu
+
+   # Install Python and ffmpeg
+   sudo yum install python3 python3-pip ffmpeg -y  # Amazon Linux
+   # OR
+   sudo apt install python3 python3-pip ffmpeg -y  # Ubuntu
+   ```
+
+3. **Deploy the application:**
+   ```bash
+   # Clone and setup
+   git clone https://github.com/AnTIdoTe003/py-yt-downloader.git
+   cd py-yt-downloader
+   pip3 install -r requirements.txt
+
+   # Run the API
+   python3 app.py
+   ```
+
+4. **Access your API:**
+   - URL: `http://your-ec2-public-ip:5000`
+   - Health check: `http://your-ec2-public-ip:5000/health`
+
+### Why EC2 Works Better
+- ✅ **Direct IP access** (not blocked like Render)
+- ✅ **Free tier available** (750 hours/month)
+- ✅ **Full network control**
+- ✅ **Proxy support built-in** for extra reliability
+
 ## API Usage
 
 The project now includes a REST API that returns downloadable video links instead of downloading videos directly.
@@ -165,6 +209,10 @@ curl -X POST http://localhost:5000/api/download-links \
 - ✅ Progress indicators during download
 - ✅ Error handling for invalid URLs
 - ✅ **NEW:** REST API for getting downloadable video links
+- ✅ **NEW:** Proxy support for bypassing restrictions
+- ✅ **NEW:** Rotating user agents for better compatibility
+- ✅ **NEW:** Cloud-ready (works on EC2, not blocked like Render)
+- ✅ **NEW:** Multiple fallback strategies for reliability
 
 ## Troubleshooting
 
